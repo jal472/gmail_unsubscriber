@@ -1,5 +1,7 @@
 import os.path
 import argparse
+import base64
+from bs4 import BeautifulSoup
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -7,11 +9,13 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+# Global Vars
 # readonly scope only necessary for reading message bodies
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 API_NAME = "gmail"
 API_VERSION = "v1"
 USER_EMAIL_ENDPOINT = "https://www.googleapis.com/oauth2/v2/userinfo?access_token="
+GMAIL_CREDENTIALS = None
 
 
 def gmail_authenticate() -> Credentials:
@@ -41,9 +45,12 @@ def gmail_authenticate() -> Credentials:
     return creds
 
 
-def get_emails(creds: Credentials, filter: str = None) -> list:
+def get_emails(filter: str = None) -> list:
+    '''
+    Function to retrieve emails from a search filter entered by the user. Returns a list of emails.
+    '''
     # Call the Gmail API
-    service = build("gmail", "v1", credentials=creds)
+    service = build("gmail", "v1", credentials=GMAIL_CREDENTIALS)
     results = ""
     if filter is not None:
         results = service.users().messages().list(userId="me", q=filter).execute()
@@ -53,35 +60,71 @@ def get_emails(creds: Credentials, filter: str = None) -> list:
     return results["messages"]
 
 
-def get_email_contents(creds: Credentials, email_id: str):
-    service = build("gmail", "v1", credentials=creds)
-    results = service.users().messages().get(userId="me", id=email_id).execute()
-    print(results["payload"]["parts"])
+def get_unsubscribe_link(email_id: str) -> str:
+    '''
+    Given an email id, get the contents in html and use beautiful soup to quickly find the unsubscribe link.
+    '''
+    unsubscribe_link = ""
+    service = build("gmail", "v1", credentials=GMAIL_CREDENTIALS)
+    results = service.users().messages().get(
+        userId="me",
+        id=email_id,
+        format="full"
+    ).execute()
+    # print(results["payload"]["parts"])
+    message_parts = results["payload"]["parts"]
+    for part in message_parts:
+        decoded_html = base64.urlsafe_b64decode(
+            part["body"]["data"].encode('UTF8'))
+        # print(type(decoded_html))
+        # print(decoded_html)
+        with open("output.html", "w") as text_file:
+            text_file.write(str(decoded_html))
+
+        # use beautiful soup to ingest the html content and sort based on <a> - anchor tags (FIND UNSUBSCRIBE LINK)
+        soup = BeautifulSoup(markup=decoded_html, features="html.parser")
+
+        links = soup.find_all("a")
+        for link in links:
+            if link.contents:
+                if "unsubscribe" in str(link.contents[0]).lower():
+                    unsubscribe_link = link.get("href")
+
+    return unsubscribe_link
 
 
-def unsubscribe_scrape(creds: Credentials, email_ids: list):
+def unsubscribe_scrape(email_ids: list):
+    '''
+    Given a list of emails, scrape the email for the unsubscribe link and access it to unsubscribe the user.
+    '''
     # For each file in the inbox, click unsubscribe.
-    get_email_contents(creds=creds, email_id=email_ids[0]["id"])
     # for email in email_ids:
-    #     get_email_contents(creds=creds, email_id=email["id"])
-    # No need to fill out a form - clicking unsubscribe works.
-    # Form needs to be filled out on unsubscribing site - these will likely be unique.
+    #   unsubscribe_link = get_unsubscribe_link(email_id=email["id"])
+    #   No need to fill out a form - clicking unsubscribe works.
+    #   Form needs to be filled out on unsubscribing site - these will likely be unique.
+
+    unsubscribe_link = get_unsubscribe_link(email_id=email_ids[5]["id"])
+    # Make http request to access the link to unsubscribe
 
 
 def main(args: dict):
+    '''
+    Main function to unsubscribe a gmail user from marketing emails.
+    '''
     # Make sure the file is being run from its current working directory
     curr_file_path = os.path.dirname(os.path.abspath(__file__))
     os.chdir(curr_file_path)
 
     # (1) Authorize and Authenticate into Gmail account
-    creds = gmail_authenticate()
-    if creds is None:
+    global GMAIL_CREDENTIALS
+    GMAIL_CREDENTIALS = gmail_authenticate()
+    if GMAIL_CREDENTIALS is None:
         print("Credentials are not valid. Adjust your authentication code and rerun.")
         exit()
     # (2) Filter email messages based on the user query provided
-    email_ids = get_emails(creds=creds, filter=args["filter"])
+    email_ids = get_emails(filter=args["filter"])
     # (3) Scrape the email contents and unsubscribe to the marketing email
-    unsubscribe_scrape(creds=creds, email_ids=email_ids)
+    unsubscribe_scrape(email_ids=email_ids)
 
 
 # my filter:  "unsubscribe -{usps, linkedin, amazon web services, geico}"

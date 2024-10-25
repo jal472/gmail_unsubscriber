@@ -13,4 +13,5 @@ Currently able to request the unsubscribe link from marketing emails but there i
 
 ## Selenium and Google Gemini Integration
 Testing can be done visually to ensure it is working first but for the final product we should use a headless browser so it seems like magic to the user.
+
 Use selenium with a headless browser: https://www.browserstack.com/guide/headless-browser-testing-selenium-python#:~:text=Headless%20browser%20testing%20using%20Selenium%20and%20Python%20is%20a%20technique,it%20runs%20in%20the%20background.

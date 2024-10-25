@@ -3,11 +3,13 @@ import argparse
 import base64
 from bs4 import BeautifulSoup
 import requests
+import time
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from googleapiclient.discovery import Resource
 from googleapiclient.errors import HttpError
 from google.auth.exceptions import RefreshError
 
@@ -19,6 +21,8 @@ API_VERSION = "v1"
 USER_EMAIL_ENDPOINT = "https://www.googleapis.com/oauth2/v2/userinfo?access_token="
 GMAIL_CREDENTIALS = None
 UNSUBSCRIBE_LINK_COUNT = 0
+UNSUBSCRIBE_LINK_STR_LIST = ['unsubscribe', 'preferences']
+GMAIL_SERVICE = None
 
 
 def gmail_user_auth() -> Credentials:
@@ -67,22 +71,22 @@ def gmail_authenticate():
             token.write(creds.to_json())
 
     GMAIL_CREDENTIALS = creds
-    # return creds
 
 
-def get_emails(filter: str = None) -> list:
+def gmail_message_search(service: Resource, filter: str = None, pageToken: str = None) -> dict:
     '''
-    Function to retrieve emails from a search filter entered by the user. Returns a list of emails.
+    Make gmail api call to get emails
     '''
-    # Call the Gmail API
-    service = build("gmail", "v1", credentials=GMAIL_CREDENTIALS)
-    results = ""
-    if filter is not None:
-        results = service.users().messages().list(userId="me", q=filter).execute()
-    else:
-        results = service.users().messages().list(userId="me").execute()
-
-    return results["messages"]
+    options = {
+        'userId': 'me',  # Use 'me' for the authenticated user
+        'q': filter,  # Example query to get unread messages
+        'pageToken': pageToken,  # Replace with a valid token if needed
+        'maxResults': 49,  # Maximum number of results to return - set this to 49 to stay within the 250 quota limit per second
+    }
+    # update options excluding None values
+    options = {k: v for k, v in options.items() if v is not None}
+    results = service.users().messages().list(**options).execute()
+    return results
 
 
 def get_unsubscribe_link(email_id: str) -> str:
@@ -91,31 +95,47 @@ def get_unsubscribe_link(email_id: str) -> str:
     '''
     unsubscribe_link = ""
     service = build("gmail", "v1", credentials=GMAIL_CREDENTIALS)
-    results = service.users().messages().get(
-        userId="me",
-        id=email_id,
-        format="full"
-    ).execute()
+    results = ""
+    # Call the Gmail API to get the email contents
+    try:
+        results = service.users().messages().get(
+            userId="me",
+            id=email_id,
+            format="full"
+        ).execute()
+    except Exception as e:
+        print("Error when using gmail api to get email contents: ", e)
+        return ""
+
+    # Extract the HTML content from the email payload
     try:
         message_parts = results["payload"]["parts"]
         for part in message_parts:
             decoded_html = base64.urlsafe_b64decode(
                 part["body"]["data"].encode('UTF8'))
-            # print(type(decoded_html))
-            # print(decoded_html)
-            with open("output.html", "w") as text_file:
-                text_file.write(str(decoded_html))
 
             # use beautiful soup to ingest the html content and sort based on <a> - anchor tags (FIND UNSUBSCRIBE LINK)
             soup = BeautifulSoup(markup=decoded_html, features="html.parser")
 
             links = soup.find_all("a")
+            unsubscribe_found = False
             for link in links:
                 if link.contents:
-                    if "unsubscribe" in str(link.contents[0]).lower():
-                        unsubscribe_link = link.get("href")
+                    lower_link_contents = str(link.contents[0]).lower()
+
+                    # using list comprehension
+                    # checking if link contents contains possible unsubscribe strings
+                    res = any(ele in lower_link_contents for ele in UNSUBSCRIBE_LINK_STR_LIST)  # nopep8
+                    if res:
+                        # prefer unsubscribe
+                        if "unsubscribe" in lower_link_contents:
+                            unsubscribe_found = True
+                            unsubscribe_link = link.get("href")
+                        elif not unsubscribe_found:
+                            unsubscribe_link = link.get("href")
     except Exception as e:
-        print("Error when accessing email contents: ", e)
+        # print("Error when accessing email contents: ", e)
+        pass
 
     return unsubscribe_link
 
@@ -129,9 +149,12 @@ def request_unsubscribe_link(link: str):
         response = requests.get(link)
         if response.status_code == 200:
             UNSUBSCRIBE_LINK_COUNT += 1
+        # TODO: Integrate Google's Gemini LLM to tell us how to fill out forms on the next page
     except Exception as e:
-        print("Request Failed for link: ", link)
-        print("General Exception Caught: ", e)
+        # For now, suppress the error message. TODO: Add this to a log file.
+        # print("Request Failed for link: ", link)
+        # print("General Exception Caught: ", e)
+        pass
 
 
 def unsubscribe_scrape(email_ids: list):
@@ -139,16 +162,17 @@ def unsubscribe_scrape(email_ids: list):
     Given a list of emails, scrape the email for the unsubscribe link and access it to unsubscribe the user.
     '''
     # For each file in the inbox, click unsubscribe.
+    count = 0
     for email in email_ids:
         unsubscribe_link = get_unsubscribe_link(email_id=email["id"])
-        # Make http request to access the link to unsubscribe - currently assumes just accessing the link will unsubscribe the user.
-        request_unsubscribe_link(link=unsubscribe_link)
-        #   No need to fill out a form - clicking unsubscribe works.
-        #   Form needs to be filled out on unsubscribing site - these will likely be unique.
+        if unsubscribe_link != "":
+            count += 1
+            # Make http request to access the link to unsubscribe - currently assumes just accessing the link will unsubscribe the user.
+            request_unsubscribe_link(link=unsubscribe_link)
+            #   No need to fill out a form - clicking unsubscribe works.
+            #   Form needs to be filled out on unsubscribing site - these will likely be unique.
 
-    unsubscribe_link = get_unsubscribe_link(email_id=email_ids[1]["id"])
-    # Make http request to access the link to unsubscribe
-    request_unsubscribe_link(link=unsubscribe_link)
+    print(f"Attempted to unsubscribe from: {count}")
 
 
 def main(args: dict):
@@ -160,16 +184,52 @@ def main(args: dict):
     os.chdir(curr_file_path)
 
     # (1) Authorize and Authenticate into Gmail account
+    print("Authenticating access to Gmail account...")
     gmail_authenticate()
     if GMAIL_CREDENTIALS is None:
         print("Credentials are not valid. Adjust your authentication code and rerun.")
         exit()
-    # (2) Filter email messages based on the user query provided
-    email_ids = get_emails(filter=args["filter"])
-    # (3) Scrape the email contents and unsubscribe to the marketing email
-    unsubscribe_scrape(email_ids=email_ids)
+
+    # Call the Gmail API
+    service = build("gmail", "v1", credentials=GMAIL_CREDENTIALS)
+    results = ""
+    page_count = 1
+    email_count = 0
+    while True:
+        # (2) Filter email messages based on the user query provided
+        email_ids = []
+        print(f"Getting email messages on page {page_count}")
+        if "nextPageToken" in results:
+            # use next page token to continue appending email ids
+            results = gmail_message_search(
+                service=service, filter=args["filter"], pageToken=results["nextPageToken"])
+            email_ids = results["messages"]
+        elif results == "":
+            # perform first search
+            results = gmail_message_search(
+                service=service, filter=args["filter"])
+            email_ids = results["messages"]
+        else:
+            # otherwise break
+            break
+        email_count += len(email_ids)
+
+        print(f"Current GMail quota units used: {(len(email_ids)+1)*5}")
+
+        # (3) Scrape the email contents and unsubscribe to the marketing email
+        print("Unsubscribing from marketing emails...")
+        unsubscribe_scrape(email_ids=email_ids)
+
+        # We want to sleep for 1 second between the many calls to the gmail api being made.
+        # This will prevent us from hitting request limit (250 quota units per user per second)
+        print("entering sleep to prevent quota limit...")
+        time.sleep(1)
+        print()
+
+        page_count += 1
+
     # Report to user the amount of emails attempted to unsubscribe from
-    print(f"Attempted to unsubscribe from: {UNSUBSCRIBE_LINK_COUNT} marketing emails.")  # nopep8
+    print(f"Total unsubscribe attempts: {UNSUBSCRIBE_LINK_COUNT} out of {email_count}.")  # nopep8
 
 
 # my filter:  "unsubscribe -{usps, linkedin, amazon web services, geico}"
